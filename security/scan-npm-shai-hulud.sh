@@ -24,8 +24,16 @@
 # Exit codes: 0 = nothing found, 1 = findings, 2 = bad usage.
 #
 # Covers two waves of the same campaign:
-#   Aug 2026 -- https://www.aikido.dev/blog/keyv-and-friends-compromised-in-npm-supply-chain-attack
+#   Aug 2026 -- keyv and friends
 #   Nov 2025 -- earlier Shai-Hulud wave (bun payload filenames)
+#
+# CREDIT
+# The Aug 2026 indicators -- affected packages and versions, payload filenames,
+# SHA-256 hashes, and exfiltration infrastructure -- were researched and published
+# by Aikido Security. This script only automates checking for what they found.
+# Thank you.
+#
+#   https://www.aikido.dev/blog/keyv-and-friends-compromised-in-npm-supply-chain-attack
 
 set -uo pipefail
 
@@ -64,6 +72,17 @@ EXFIL_STRINGS=(
   "0xE1f2395ee43e45A1556EC6438a88c31B83493103"
 )
 
+# Legitimate files that happen to share a payload name. regenerate-unicode-properties
+# is a very common transitive dependency and genuinely ships a Math_Symbol.js full of
+# unicode data. Without this, a clean machine reports a handful of scary hits and the
+# scan stops being worth reading.
+#
+# Only applied when the hash does NOT match a known-bad sample -- a real payload
+# planted at one of these paths is still reported.
+declare -A KNOWN_BENIGN=(
+  ["/regenerate-unicode-properties/General_Category/Math_Symbol.js"]="regenerate-unicode-properties -- legitimate unicode data table"
+)
+
 # --------------------------------------------------------------------- setup
 
 target="."
@@ -72,7 +91,7 @@ quiet=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --quiet|-q) quiet=1 ;;
-    --help|-h)  sed -n '3,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --help|-h)  sed -n '3,36p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*)         echo "unknown option: $1 (try --help)" >&2; exit 2 ;;
     *)          target="$1" ;;
   esac
@@ -106,16 +125,34 @@ printf '%sScanning %s for Shai-Hulud IoCs...%s\n' "$CYAN" "$target" "$OFF"
 
 check "1. Malicious payload files"
 before=$findings
+benign=0
 find_args=()
 for name in "${PAYLOAD_FILES[@]}"; do find_args+=(-o -name "$name"); done
 while IFS= read -r file; do
   hash="$(sha256 "$file")"
-  if [ -n "${KNOWN_HASHES[$hash]:-}" ]; then note="matches ${KNOWN_HASHES[$hash]}"
-  else note="unknown variant -- hash not in the published set"; fi
+  if [ -n "${KNOWN_HASHES[$hash]:-}" ]; then
+    note="matches ${KNOWN_HASHES[$hash]}"
+  else
+    note="unknown variant -- hash not in the published set"
+    skip=""
+    for suffix in "${!KNOWN_BENIGN[@]}"; do
+      case "$file" in
+        *"$suffix") skip="${KNOWN_BENIGN[$suffix]}"; break ;;
+      esac
+    done
+    if [ -n "$skip" ]; then
+      benign=$((benign + 1))
+      [ "$quiet" -eq 1 ] || printf '  ignored: %s (%s)\n' "$file" "$skip"
+      continue
+    fi
+  fi
   finding "$file"
   printf '           sha256 %s (%s)\n' "$hash" "$note"
 done < <(find "$target" -type f \( "${find_args[@]:1}" \) 2>/dev/null)
-[ "$findings" -eq "$before" ] && clear_msg "no known payload filenames"
+if [ "$findings" -eq "$before" ]; then
+  if [ "$benign" -gt 0 ]; then clear_msg "no known payload filenames ($benign known-benign file(s) ignored)"
+  else clear_msg "no known payload filenames"; fi
+fi
 
 # ------------------------------------------- 2. preinstall hook in a manifest
 
@@ -174,7 +211,10 @@ done < <(find "$target" -type f \( -path "*/.vscode/tasks.json" -o -path "*/.cla
 
 check "6. Exfiltration infrastructure strings"
 before=$findings
+# This script carries the indicator strings itself, so it would flag its own copy.
+self="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
 while IFS= read -r hit; do
+  [ "${hit%%:*}" = "$self" ] && continue
   finding "$hit"
 done < <(grep -rnIF --exclude-dir=.git \
            -e "${EXFIL_STRINGS[0]}" -e "${EXFIL_STRINGS[1]}" -e "${EXFIL_STRINGS[2]}" \

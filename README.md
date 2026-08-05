@@ -69,11 +69,35 @@ Six checks, read-only — nothing is modified, deleted, or quarantined:
 
 **Exit `0` when nothing is found, `1` on findings, `2` on bad usage** — so it drops straight into CI or a pre-commit hook.
 
+### Speed
+
+Built for trees full of `node_modules`. It enumerates paths once via the native `dir /s /b` (PowerShell) or `find` (bash), narrows by string matching, and only then opens a file. Content searches run as a single `findstr`/`grep` process rather than a per-file pipeline.
+
+Measured on a real projects root: **150,120 files, all six checks, ~60s.**
+
+Avoid `Get-ChildItem -Recurse -Include` if you write your own version — it's ~8× slower than native `dir` on a small tree and degrades badly with scale. That pattern is what makes naive versions of this scan appear to hang for hours.
+
+### False positives
+
+`regenerate-unicode-properties` — a very common transitive dependency — genuinely ships a file called `Math_Symbol.js`. Those are recognised and reported as `ignored:` with a count, not as findings, **unless the hash matches a known-bad sample**. A real payload planted at that path is still reported.
+
+Scanning a tree that contains this repo will flag the scripts and this README under check 6 — they carry the indicator strings by definition. Each script skips its own file, but not its sibling.
+
 A payload filename is reported whether or not its hash matches. A matching hash confirms the exact published sample; a **non-matching hash means an unknown variant, not a clean file**. Triage every hit by hand, and rotate npm/GitHub/cloud tokens before writing one off as a false positive.
 
 Indicators live in one clearly-marked block at the top of each file. When new ones are published, that block is the only thing that changes.
 
 For known, catalogued vulnerabilities, use [osv-scanner](https://github.com/google/osv-scanner) or `npm audit` — they're maintained and complete. This is for the first days of a fresh incident, when the indicators are in a blog post and no scanner has ingested them yet.
+
+### 🙏 Credit
+
+The August 2026 indicators — the affected packages and their exact versions, the payload filenames, the SHA-256 hashes, and the exfiltration infrastructure — were researched and published by **[Aikido Security](https://www.aikido.dev/)**:
+
+> [keyv and friends compromised in npm supply chain attack](https://www.aikido.dev/blog/keyv-and-friends-compromised-in-npm-supply-chain-attack)
+
+That post is how I found out about the attack in the first place, and these scripts do nothing more than automate checking for what their research turned up. Thank you.
+
+The credit is repeated inside both scripts, so it travels with the file when someone downloads or copy-pastes just the one.
 
 ---
 

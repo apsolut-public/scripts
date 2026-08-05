@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     Standalone and read-only. Download this one file, or copy-paste it into a local
-    .ps1 -- it needs nothing else from this repo and installs nothing.
+    script -- it needs nothing else from this repo and installs nothing.
 
     Six checks:
       1. Malicious payload files by name (SHA-256 printed alongside each hit)
@@ -13,6 +13,12 @@
       4. GitHub Actions workflows that dump the whole secrets context
       5. IDE persistence written into .vscode/tasks.json or .claude/settings.json
       6. Exfiltration strings -- fallback domain, campaign marker, wallet address
+
+    Built for speed on trees full of node_modules. It enumerates paths once with
+    the native `dir /s /b`, which is orders of magnitude faster than PowerShell's
+    Get-ChildItem -Recurse, then narrows by string matching before opening any
+    file. Content searches run through `findstr` against a prepared file list, so
+    each check is a single native process rather than a per-file pipeline.
 
     A payload filename is reported whether or not its hash matches a known variant.
     A matching hash confirms the exact published sample; a non-matching hash means an
@@ -25,17 +31,26 @@
     Suppress the per-check "Clear" lines; print findings and the summary only.
 
 .EXAMPLE
-    .\scan-npm-shai-hulud.ps1 -Path D:\sites
+    PS> .\scan-npm-shai-hulud.ps1 -Path D:\sites
 
 .EXAMPLE
-    .\scan-npm-shai-hulud.ps1; if ($LASTEXITCODE -ne 0) { "compromised" }
+    PS> .\scan-npm-shai-hulud.ps1 -Path C:\sites -Quiet
+    PS> if ($LASTEXITCODE -ne 0) { "compromised" }
 
 .NOTES
     Exit codes: 0 = nothing found, 1 = findings, 2 = bad usage.
 
     Covers two waves of the same campaign:
-      Aug 2026 -- https://www.aikido.dev/blog/keyv-and-friends-compromised-in-npm-supply-chain-attack
+      Aug 2026 -- keyv and friends
       Nov 2025 -- earlier Shai-Hulud wave (bun payload filenames)
+
+    CREDIT
+    The Aug 2026 indicators -- affected packages and versions, payload filenames,
+    SHA-256 hashes, and exfiltration infrastructure -- were researched and published
+    by Aikido Security. This script only automates checking for what they found.
+    Thank you.
+
+      https://www.aikido.dev/blog/keyv-and-friends-compromised-in-npm-supply-chain-attack
 #>
 [CmdletBinding()]
 param(
@@ -83,10 +98,27 @@ $exfilStrings = @(
     '0xE1f2395ee43e45A1556EC6438a88c31B83493103'
 )
 
+# Legitimate files that happen to share a payload name. regenerate-unicode-properties
+# is a very common transitive dependency and genuinely ships a Math_Symbol.js full of
+# unicode data. Without this, a clean machine reports a handful of scary hits and the
+# scan stops being worth reading.
+#
+# Only applied when the hash does NOT match a known-bad sample -- a real payload
+# planted at one of these paths is still reported.
+$knownBenign = @(
+    @{ Suffix = '/regenerate-unicode-properties/General_Category/Math_Symbol.js'
+       Reason = 'regenerate-unicode-properties -- legitimate unicode data table' }
+)
+
+# Extensions worth searching for embedded strings. Skips binaries and media,
+# which is what keeps check 6 from reading gigabytes of images and archives.
+$textExtensions = @('.js', '.mjs', '.cjs', '.ts', '.json', '.yml', '.yaml', '.txt',
+                    '.md', '.sh', '.ps1', '.bat', '.cmd', '.env', '.lock', '.map')
+
 # --------------------------------------------------------------------- setup
 
 try {
-    $root = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).ProviderPath
+    $root = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).ProviderPath.TrimEnd('\')
 }
 catch {
     Write-Error "Path not found: $Path"
@@ -111,103 +143,166 @@ function Write-Check {
     if (-not $Quiet) { Write-Host "`n$Message" -ForegroundColor Yellow }
 }
 
+# findstr recurses natively with /s and prints just the matching filenames with
+# /m. One native process per check beats opening every candidate from PowerShell.
+# Never name the splat variable $args -- that is an automatic variable, and
+# splatting it inside a function passes the wrong values.
+function Find-InTree {
+    param([string] $Root, [string[]] $FileSpecs, [string[]] $Literals)
+    $fsArgs = @('/s', '/m', '/i') + ($Literals | ForEach-Object { '/c:' + $_ })
+    $fsArgs += ($FileSpecs | ForEach-Object { Join-Path $Root $_ })
+    $matched = & findstr.exe @fsArgs 2>$null
+    if ($null -eq $matched) { return @() }
+    return @($matched | Where-Object { $_ -match '\S' })
+}
+
 Write-Host "Scanning $root for Shai-Hulud IoCs..." -ForegroundColor Cyan
 
-# One enumeration, reused by every check. -Force picks up dotted dirs like .vscode/.claude.
-$allFiles = @(Get-ChildItem -LiteralPath $root -Recurse -File -Force -ErrorAction SilentlyContinue)
+# ---------------------------------------------------------- one enumeration
+# `dir /s /b /a-d` walks the tree in native code and prints one full path per
+# line. On a projects root full of node_modules this finishes in seconds where
+# Get-ChildItem -Recurse can take hours.
 
-if (-not $Quiet) { Write-Host "  ($($allFiles.Count) files)" -ForegroundColor DarkGray }
+if (-not $Quiet) { Write-Host "  Enumerating paths..." -NoNewline -ForegroundColor DarkGray }
+$sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+$allPaths = @(& cmd.exe /c "dir /s /b /a-d `"$root`" 2>nul")
+$allPaths = @($allPaths | Where-Object { $_ -match '\S' })
+
+$sw.Stop()
+if (-not $Quiet) {
+    Write-Host " $($allPaths.Count) files in $([math]::Round($sw.Elapsed.TotalSeconds,1))s" -ForegroundColor DarkGray
+}
+
+if ($allPaths.Count -eq 0) {
+    Write-Host "No files found under $root -- is the path right?" -ForegroundColor Yellow
+    exit 2
+}
+
+# Precompute leaf names once; every check below filters on strings, not on disk.
+$leaf = @{}
+foreach ($p in $allPaths) { $leaf[$p] = [System.IO.Path]::GetFileName($p) }
 
 # --------------------------------------------------- 1. payload files by name
 
 Write-Check '1. Malicious payload files'
 $before = $findings
-foreach ($file in $allFiles | Where-Object { $payloadFiles -contains $_.Name }) {
-    $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLower()
+$benign = 0
+foreach ($p in $allPaths) {
+    if ($payloadFiles -notcontains $leaf[$p]) { continue }
+    $hash = try { (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLower() } catch { 'unavailable' }
+
+    if (-not $knownHashes.ContainsKey($hash)) {
+        $normalized = $p -replace '\\', '/'
+        $match = @($knownBenign | Where-Object { $normalized.EndsWith($_.Suffix) })
+        if ($match.Count -gt 0) {
+            $benign++
+            if (-not $Quiet) { Write-Host "  ignored: $p ($($match[0].Reason))" -ForegroundColor DarkGray }
+            continue
+        }
+    }
+
     $note = if ($knownHashes.ContainsKey($hash)) { "matches $($knownHashes[$hash])" } else { 'unknown variant -- hash not in the published set' }
-    Write-Finding "$($file.FullName)`n           sha256 $hash ($note)"
+    Write-Finding "$p`n           sha256 $hash ($note)"
 }
-if ($findings -eq $before) { Write-Clear 'no known payload filenames' }
+if ($findings -eq $before) {
+    $suffix = if ($benign -gt 0) { " ($benign known-benign file(s) ignored)" } else { '' }
+    Write-Clear "no known payload filenames$suffix"
+}
 
 # ------------------------------------------------ 2. preinstall hook in a manifest
 
 Write-Check '2. package.json preinstall hooks running a payload'
 $before = $findings
+$manifests = @($allPaths | Where-Object { $leaf[$_] -eq 'package.json' })
 $payloadPattern = ($payloadFiles | ForEach-Object { [regex]::Escape($_) }) -join '|'
-foreach ($file in $allFiles | Where-Object { $_.Name -eq 'package.json' }) {
-    $hits = Select-String -LiteralPath $file.FullName -Pattern "`"preinstall`"\s*:\s*`".*($payloadPattern)" -ErrorAction SilentlyContinue
+
+# Narrow to manifests mentioning a payload at all, then read only those.
+$candidates = Find-InTree -Root $root -FileSpecs @('package.json') -Literals $payloadFiles
+foreach ($file in $candidates) {
+    $hits = Select-String -LiteralPath $file -Pattern "`"preinstall`"\s*:\s*`".*($payloadPattern)" -ErrorAction SilentlyContinue
     foreach ($hit in $hits) {
-        Write-Finding "$($file.FullName) (line $($hit.LineNumber)): $($hit.Line.Trim())"
+        Write-Finding "$file (line $($hit.LineNumber)): $($hit.Line.Trim())"
     }
 }
-if ($findings -eq $before) { Write-Clear 'no payload preinstall hooks' }
+if ($findings -eq $before) { Write-Clear "no payload preinstall hooks ($($manifests.Count) manifests)" }
 
 # --------------------------------------- 3. compromised versions in node_modules
 
 Write-Check '3. Compromised package versions under node_modules'
 $before = $findings
-foreach ($file in $allFiles | Where-Object { $_.Name -eq 'package.json' }) {
-    $normalized = $file.FullName -replace '\\', '/'
-    $marker = '/node_modules/'
-    $idx = $normalized.LastIndexOf($marker)
+$checked = 0
+foreach ($p in $manifests) {
+    $normalized = $p -replace '\\', '/'
+    $idx = $normalized.LastIndexOf('/node_modules/')
     if ($idx -lt 0) { continue }
 
     # Everything after the LAST node_modules/, minus /package.json, is the package
     # key. Handles nesting and @scope/name alike.
-    $key = $normalized.Substring($idx + $marker.Length) -replace '/package\.json$', ''
+    $key = $normalized.Substring($idx + 14) -replace '/package\.json$', ''
     if (-not $compromised.ContainsKey($key)) { continue }
 
+    $checked++
     try {
-        $version = (Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json).version
+        $version = (Get-Content -LiteralPath $p -Raw -ErrorAction Stop | ConvertFrom-Json).version
     }
     catch {
         continue   # unparseable manifest -- not an indicator on its own
     }
 
     if ($version -eq $compromised[$key]) {
-        Write-Finding "$key@$version installed at $($file.DirectoryName)"
+        Write-Finding "$key@$version installed at $([System.IO.Path]::GetDirectoryName($p))"
     }
 }
-if ($findings -eq $before) { Write-Clear 'no compromised versions installed' }
+if ($findings -eq $before) { Write-Clear "no compromised versions installed ($checked matching packages inspected)" }
 
 # ------------------------------------------------ 4. workflow secret exfiltration
 
 Write-Check '4. GitHub Actions workflows dumping secrets'
 $before = $findings
-$workflows = $allFiles | Where-Object {
-    ($_.Extension -in '.yml', '.yaml') -and (($_.FullName -replace '\\', '/') -match '/\.github/workflows/')
+$workflows = @($allPaths | Where-Object {
+    ($_ -like '*.yml' -or $_ -like '*.yaml') -and ($_ -replace '\\', '/') -match '/\.github/workflows/'
+})
+# Workflow files are few even in a big tree, so read them directly.
+foreach ($file in $workflows) {
+    foreach ($hit in (Select-String -LiteralPath $file -Pattern 'toJSON\(\s*secrets\s*\)' -ErrorAction SilentlyContinue)) {
+        Write-Finding "$file (line $($hit.LineNumber)): $($hit.Line.Trim())"
+    }
 }
-foreach ($hit in $workflows | ForEach-Object { Select-String -LiteralPath $_.FullName -Pattern 'toJSON\(\s*secrets\s*\)' -ErrorAction SilentlyContinue }) {
-    Write-Finding "$($hit.Path) (line $($hit.LineNumber)): $($hit.Line.Trim())"
-}
-if ($findings -eq $before) { Write-Clear 'no secrets-context dumps in workflows' }
+if ($findings -eq $before) { Write-Clear "no secrets-context dumps in workflows ($($workflows.Count) workflow files)" }
 
 # ---------------------------------------------------- 5. IDE persistence files
 
 Write-Check '5. IDE persistence (.vscode / .claude)'
 $before = $findings
-$ideFiles = $allFiles | Where-Object {
-    $p = $_.FullName -replace '\\', '/'
-    ($p -match '/\.vscode/tasks\.json$') -or ($p -match '/\.claude/settings\.json$')
-}
+$ideFiles = @($allPaths | Where-Object {
+    $n = ($_ -replace '\\', '/')
+    ($n -match '/\.vscode/tasks\.json$') -or ($n -match '/\.claude/settings\.json$')
+})
+# Also few in number -- one .vscode/.claude pair per project at most.
 foreach ($file in $ideFiles) {
-    $hits = Select-String -LiteralPath $file.FullName -Pattern $payloadPattern -ErrorAction SilentlyContinue
-    foreach ($hit in $hits) {
-        Write-Finding "$($file.FullName) (line $($hit.LineNumber)): references a payload -- $($hit.Line.Trim())"
+    foreach ($hit in (Select-String -LiteralPath $file -Pattern $payloadPattern -ErrorAction SilentlyContinue)) {
+        Write-Finding "$file (line $($hit.LineNumber)): references a payload -- $($hit.Line.Trim())"
     }
 }
-if ($findings -eq $before) { Write-Clear 'no payload references in IDE config' }
+if ($findings -eq $before) { Write-Clear "no payload references in IDE config ($($ideFiles.Count) config files)" }
 
 # ------------------------------------------------------- 6. exfiltration strings
 
 Write-Check '6. Exfiltration infrastructure strings'
 $before = $findings
+$textFiles = @($allPaths | Where-Object { $textExtensions -contains [System.IO.Path]::GetExtension($_).ToLower() })
 $exfilPattern = ($exfilStrings | ForEach-Object { [regex]::Escape($_) }) -join '|'
-$textLike = $allFiles | Where-Object { $_.Length -lt 2MB -and $_.Extension -notin '.png', '.jpg', '.jpeg', '.gif', '.zip', '.gz', '.pdf', '.woff', '.woff2', '.ico', '.mp4' }
-foreach ($hit in $textLike | ForEach-Object { Select-String -LiteralPath $_.FullName -Pattern $exfilPattern -ErrorAction SilentlyContinue }) {
-    Write-Finding "$($hit.Path) (line $($hit.LineNumber)): $($hit.Matches[0].Value)"
+$specs = $textExtensions | ForEach-Object { '*' + $_ }
+# This script carries the indicator strings itself, so it would flag its own copy.
+$self = if ($PSCommandPath) { $PSCommandPath } else { '' }
+foreach ($file in (Find-InTree -Root $root -FileSpecs $specs -Literals $exfilStrings)) {
+    if ($self -and ($file -ieq $self)) { continue }
+    foreach ($hit in (Select-String -LiteralPath $file -Pattern $exfilPattern -ErrorAction SilentlyContinue)) {
+        Write-Finding "$file (line $($hit.LineNumber)): $($hit.Matches[0].Value)"
+    }
 }
-if ($findings -eq $before) { Write-Clear 'no exfiltration strings' }
+if ($findings -eq $before) { Write-Clear "no exfiltration strings ($($textFiles.Count) text files searched)" }
 
 # ------------------------------------------------------------------- summary
 
