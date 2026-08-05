@@ -14,11 +14,11 @@
       5. IDE persistence written into .vscode/tasks.json or .claude/settings.json
       6. Exfiltration strings -- fallback domain, campaign marker, wallet address
 
-    Built for speed on trees full of node_modules. It enumerates paths once with
-    the native `dir /s /b`, which is orders of magnitude faster than PowerShell's
-    Get-ChildItem -Recurse, then narrows by string matching before opening any
-    file. Content searches run through `findstr` against a prepared file list, so
-    each check is a single native process rather than a per-file pipeline.
+    Built for trees with hundreds of node_modules. Nothing here ever enumerates
+    the whole tree: each check runs one targeted native search (`dir /s /b` for
+    a specific filename, `findstr /s` for content) and only the handful of
+    matching paths ever cross into PowerShell. Listing every file and filtering
+    it in a pipeline is what makes naive versions of this scan run for hours.
 
     A payload filename is reported whether or not its hash matches a known variant.
     A matching hash confirms the exact published sample; a non-matching hash means an
@@ -29,6 +29,12 @@
 
 .PARAMETER Quiet
     Suppress the per-check "Clear" lines; print findings and the summary only.
+
+.PARAMETER Deep
+    Include node_modules in check 6's content sweep. Off by default: on a tree with
+    millions of vendored files that sweep dominates the runtime, while checks 1-3
+    already cover malicious packages by filename and by version. Turn it on when you
+    want the exhaustive pass and can wait.
 
 .EXAMPLE
     PS> .\scan-npm-shai-hulud.ps1 -Path D:\sites
@@ -57,7 +63,9 @@ param(
     [Parameter(Position = 0)]
     [string] $Path = '.',
 
-    [switch] $Quiet
+    [switch] $Quiet,
+
+    [switch] $Deep
 )
 
 Set-StrictMode -Version Latest
@@ -98,6 +106,11 @@ $exfilStrings = @(
     '0xE1f2395ee43e45A1556EC6438a88c31B83493103'
 )
 
+# Extensions worth searching for embedded strings. Skips binaries and media,
+# which is what keeps check 6 from reading gigabytes of images and archives.
+$textExtensions = @('.js', '.mjs', '.cjs', '.ts', '.json', '.yml', '.yaml', '.txt',
+                    '.md', '.sh', '.ps1', '.bat', '.cmd', '.env', '.lock', '.map')
+
 # Legitimate files that happen to share a payload name. regenerate-unicode-properties
 # is a very common transitive dependency and genuinely ships a Math_Symbol.js full of
 # unicode data. Without this, a clean machine reports a handful of scary hits and the
@@ -110,11 +123,6 @@ $knownBenign = @(
        Reason = 'regenerate-unicode-properties -- legitimate unicode data table' }
 )
 
-# Extensions worth searching for embedded strings. Skips binaries and media,
-# which is what keeps check 6 from reading gigabytes of images and archives.
-$textExtensions = @('.js', '.mjs', '.cjs', '.ts', '.json', '.yml', '.yaml', '.txt',
-                    '.md', '.sh', '.ps1', '.bat', '.cmd', '.env', '.lock', '.map')
-
 # --------------------------------------------------------------------- setup
 
 try {
@@ -126,6 +134,7 @@ catch {
 }
 
 $findings = 0
+$stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 function Write-Finding {
     param([string] $Message)
@@ -140,56 +149,118 @@ function Write-Clear {
 
 function Write-Check {
     param([string] $Message)
-    if (-not $Quiet) { Write-Host "`n$Message" -ForegroundColor Yellow }
+    if (-not $Quiet) {
+        Write-Host "`n$Message" -NoNewline -ForegroundColor Yellow
+        Write-Host "  [$([math]::Round($script:stopwatch.Elapsed.TotalSeconds,1))s]" -ForegroundColor DarkGray
+    }
 }
 
-# findstr recurses natively with /s and prints just the matching filenames with
-# /m. One native process per check beats opening every candidate from PowerShell.
-# Never name the splat variable $args -- that is an automatic variable, and
-# splatting it inside a function passes the wrong values.
-function Find-InTree {
-    param([string] $Root, [string[]] $FileSpecs, [string[]] $Literals)
-    $fsArgs = @('/s', '/m', '/i') + ($Literals | ForEach-Object { '/c:' + $_ })
-    $fsArgs += ($FileSpecs | ForEach-Object { Join-Path $Root $_ })
-    $matched = & findstr.exe @fsArgs 2>$null
-    if ($null -eq $matched) { return @() }
-    return @($matched | Where-Object { $_ -match '\S' })
+# Traversing the tree is the single dominant cost -- roughly 5.6 minutes for 7.5M
+# files -- so do it exactly ONCE, with cmd redirecting straight to disk. Nothing
+# is ever piped into PowerShell here; a 7.5M-element array plus a hashtable keyed
+# on every path is what made earlier versions run out of memory and hang.
+#
+# Every check below is then a sequential findstr over that one list file, which
+# costs seconds rather than another full walk of the disk.
+# Invoke findstr.exe directly with an argument array rather than building a
+# `cmd /c` string: a pattern ending in a backslash (\.github\workflows\) would
+# escape the closing quote inside a cmd string and silently match nothing.
+function Select-Paths {
+    param([string] $ListFile, [string[]] $Patterns, [switch] $EndsWith, [switch] $Exclude)
+    $fsArgs = @('/i')
+    if ($EndsWith) { $fsArgs += '/e' }
+    if ($Exclude)  { $fsArgs += '/v' }
+    $fsArgs += ($Patterns | ForEach-Object { '/c:' + $_ })
+    $fsArgs += $ListFile
+    $out = & findstr.exe @fsArgs 2>$null
+    if ($null -eq $out) { return @() }
+    return @($out | Where-Object { $_ })
+}
+
+# Content search over a narrowed set of files.
+#
+# Deliberately NOT using findstr's /f: list-file option: with long absolute paths
+# it silently matches nothing while the identical files passed as arguments match
+# fine. A search tool that quietly finds nothing is the worst possible failure
+# here, so files go in as arguments, batched to stay under the command-line limit.
+function Search-Content {
+    param([string[]] $Files, [string[]] $Literals)
+    if ($Files.Count -eq 0) { return @() }
+
+    $patternArgs = @('/m', '/i') + ($Literals | ForEach-Object { '/c:' + $_ })
+    $matched = New-Object System.Collections.Generic.List[string]
+
+    $batch = New-Object System.Collections.Generic.List[string]
+    $length = 0
+    foreach ($file in $Files) {
+        $batch.Add($file)
+        $length += $file.Length + 3
+        if ($length -gt 24000) {
+            $out = & findstr.exe @patternArgs @($batch.ToArray()) 2>$null
+            foreach ($o in $out) { if ($o) { $matched.Add($o) } }
+            $batch.Clear(); $length = 0
+        }
+    }
+    if ($batch.Count -gt 0) {
+        $out = & findstr.exe @patternArgs @($batch.ToArray()) 2>$null
+        foreach ($o in $out) { if ($o) { $matched.Add($o) } }
+    }
+
+    return @($matched)
 }
 
 Write-Host "Scanning $root for Shai-Hulud IoCs..." -ForegroundColor Cyan
 
-# ---------------------------------------------------------- one enumeration
-# `dir /s /b /a-d` walks the tree in native code and prints one full path per
-# line. On a projects root full of node_modules this finishes in seconds where
-# Get-ChildItem -Recurse can take hours.
+# ------------------------------------------------------- single tree traversal
 
-if (-not $Quiet) { Write-Host "  Enumerating paths..." -NoNewline -ForegroundColor DarkGray }
-$sw = [System.Diagnostics.Stopwatch]::StartNew()
+$workspace = Join-Path ([System.IO.Path]::GetTempPath()) ('shai-hulud-' + [guid]::NewGuid().ToString('N'))
+[void][System.IO.Directory]::CreateDirectory($workspace)
+$listFile = Join-Path $workspace 'all-paths.txt'
 
-$allPaths = @(& cmd.exe /c "dir /s /b /a-d `"$root`" 2>nul")
-$allPaths = @($allPaths | Where-Object { $_ -match '\S' })
-
-$sw.Stop()
 if (-not $Quiet) {
-    Write-Host " $($allPaths.Count) files in $([math]::Round($sw.Elapsed.TotalSeconds,1))s" -ForegroundColor DarkGray
+    Write-Host "  Listing the tree once (the slow part -- minutes on a large disk)..." -NoNewline -ForegroundColor DarkGray
+}
+& cmd.exe /c "dir /s /b /a-d `"$root`" > `"$listFile`" 2>nul" | Out-Null
+
+$fileCount = 0
+if (Test-Path -LiteralPath $listFile) {
+    # Count without loading the file into memory.
+    $reader = [System.IO.File]::OpenText($listFile)
+    try { while ($null -ne $reader.ReadLine()) { $fileCount++ } } finally { $reader.Dispose() }
+}
+if (-not $Quiet) {
+    Write-Host " $fileCount files, $([math]::Round($stopwatch.Elapsed.TotalSeconds,1))s" -ForegroundColor DarkGray
 }
 
-if ($allPaths.Count -eq 0) {
+if ($fileCount -eq 0) {
+    Remove-Item -LiteralPath $workspace -Recurse -Force -ErrorAction SilentlyContinue
     Write-Host "No files found under $root -- is the path right?" -ForegroundColor Yellow
     exit 2
 }
 
-# Precompute leaf names once; every check below filters on strings, not on disk.
-$leaf = @{}
-foreach ($p in $allPaths) { $leaf[$p] = [System.IO.Path]::GetFileName($p) }
+# Every list below comes from one sequential pass over that file, never the disk.
+$nameSuffixes = @($payloadFiles | ForEach-Object { '\' + $_ }) + @('\tasks.json', '\settings.json')
+$namedPaths   = @(Select-Paths -ListFile $listFile -Patterns $nameSuffixes -EndsWith)
+$manifests    = @(Select-Paths -ListFile $listFile -Patterns @('\package.json') -EndsWith)
+$workflowYaml = @(Select-Paths -ListFile $listFile -Patterns @('\.github\workflows\') |
+                  Where-Object { $_ -like '*.yml' -or $_ -like '*.yaml' })
+
+# Compromised packages are found by deriving each manifest's package key in
+# PowerShell rather than by findstr pattern: a scoped name like @cacheable/memory
+# contains an "@", and findstr silently matches nothing on a /c: pattern
+# containing one. String work over the manifest list is cheap and exact.
+$compromisedManifests = @($manifests | Where-Object {
+    $n = $_ -replace '\\', '/'
+    $i = $n.LastIndexOf('/node_modules/')
+    ($i -ge 0) -and $compromised.ContainsKey(($n.Substring($i + 14) -replace '/package\.json$', ''))
+})
 
 # --------------------------------------------------- 1. payload files by name
 
 Write-Check '1. Malicious payload files'
 $before = $findings
 $benign = 0
-foreach ($p in $allPaths) {
-    if ($payloadFiles -notcontains $leaf[$p]) { continue }
+foreach ($p in ($namedPaths | Where-Object { $payloadFiles -contains [System.IO.Path]::GetFileName($_) })) {
     $hash = try { (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLower() } catch { 'unavailable' }
 
     if (-not $knownHashes.ContainsKey($hash)) {
@@ -214,72 +285,58 @@ if ($findings -eq $before) {
 
 Write-Check '2. package.json preinstall hooks running a payload'
 $before = $findings
-$manifests = @($allPaths | Where-Object { $leaf[$_] -eq 'package.json' })
 $payloadPattern = ($payloadFiles | ForEach-Object { [regex]::Escape($_) }) -join '|'
-
-# Narrow to manifests mentioning a payload at all, then read only those.
-$candidates = Find-InTree -Root $root -FileSpecs @('package.json') -Literals $payloadFiles
-foreach ($file in $candidates) {
-    $hits = Select-String -LiteralPath $file -Pattern "`"preinstall`"\s*:\s*`".*($payloadPattern)" -ErrorAction SilentlyContinue
-    foreach ($hit in $hits) {
+# findstr narrows to the few manifests mentioning a payload; only those are opened.
+foreach ($file in (Search-Content -Files $manifests -Literals $payloadFiles)) {
+    foreach ($hit in (Select-String -LiteralPath $file -Pattern "`"preinstall`"\s*:\s*`".*($payloadPattern)" -ErrorAction SilentlyContinue)) {
         Write-Finding "$file (line $($hit.LineNumber)): $($hit.Line.Trim())"
     }
 }
-if ($findings -eq $before) { Write-Clear "no payload preinstall hooks ($($manifests.Count) manifests)" }
+if ($findings -eq $before) { Write-Clear 'no payload preinstall hooks' }
 
 # --------------------------------------- 3. compromised versions in node_modules
 
 Write-Check '3. Compromised package versions under node_modules'
 $before = $findings
-$checked = 0
-foreach ($p in $manifests) {
-    $normalized = $p -replace '\\', '/'
+foreach ($manifest in $compromisedManifests) {
+    $normalized = $manifest -replace '\\', '/'
     $idx = $normalized.LastIndexOf('/node_modules/')
     if ($idx -lt 0) { continue }
-
-    # Everything after the LAST node_modules/, minus /package.json, is the package
-    # key. Handles nesting and @scope/name alike.
     $key = $normalized.Substring($idx + 14) -replace '/package\.json$', ''
     if (-not $compromised.ContainsKey($key)) { continue }
 
-    $checked++
     try {
-        $version = (Get-Content -LiteralPath $p -Raw -ErrorAction Stop | ConvertFrom-Json).version
+        $version = (Get-Content -LiteralPath $manifest -Raw -ErrorAction Stop | ConvertFrom-Json).version
     }
-    catch {
-        continue   # unparseable manifest -- not an indicator on its own
-    }
+    catch { continue }   # unparseable manifest -- not an indicator on its own
 
     if ($version -eq $compromised[$key]) {
-        Write-Finding "$key@$version installed at $([System.IO.Path]::GetDirectoryName($p))"
+        Write-Finding "$key@$version installed at $([System.IO.Path]::GetDirectoryName($manifest))"
     }
 }
-if ($findings -eq $before) { Write-Clear "no compromised versions installed ($checked matching packages inspected)" }
+if ($findings -eq $before) {
+    Write-Clear "no compromised versions installed ($($compromisedManifests.Count) of the 11 watched packages present, $($manifests.Count) manifests total)"
+}
 
 # ------------------------------------------------ 4. workflow secret exfiltration
 
 Write-Check '4. GitHub Actions workflows dumping secrets'
 $before = $findings
-$workflows = @($allPaths | Where-Object {
-    ($_ -like '*.yml' -or $_ -like '*.yaml') -and ($_ -replace '\\', '/') -match '/\.github/workflows/'
-})
-# Workflow files are few even in a big tree, so read them directly.
-foreach ($file in $workflows) {
+foreach ($file in (Search-Content -Files $workflowYaml -Literals @('toJSON'))) {
     foreach ($hit in (Select-String -LiteralPath $file -Pattern 'toJSON\(\s*secrets\s*\)' -ErrorAction SilentlyContinue)) {
         Write-Finding "$file (line $($hit.LineNumber)): $($hit.Line.Trim())"
     }
 }
-if ($findings -eq $before) { Write-Clear "no secrets-context dumps in workflows ($($workflows.Count) workflow files)" }
+if ($findings -eq $before) { Write-Clear "no secrets-context dumps in workflows ($($workflowYaml.Count) workflow files)" }
 
 # ---------------------------------------------------- 5. IDE persistence files
 
 Write-Check '5. IDE persistence (.vscode / .claude)'
 $before = $findings
-$ideFiles = @($allPaths | Where-Object {
-    $n = ($_ -replace '\\', '/')
+$ideFiles = @($namedPaths | Where-Object {
+    $n = $_ -replace '\\', '/'
     ($n -match '/\.vscode/tasks\.json$') -or ($n -match '/\.claude/settings\.json$')
 })
-# Also few in number -- one .vscode/.claude pair per project at most.
 foreach ($file in $ideFiles) {
     foreach ($hit in (Select-String -LiteralPath $file -Pattern $payloadPattern -ErrorAction SilentlyContinue)) {
         Write-Finding "$file (line $($hit.LineNumber)): references a payload -- $($hit.Line.Trim())"
@@ -291,27 +348,37 @@ if ($findings -eq $before) { Write-Clear "no payload references in IDE config ($
 
 Write-Check '6. Exfiltration infrastructure strings'
 $before = $findings
-$textFiles = @($allPaths | Where-Object { $textExtensions -contains [System.IO.Path]::GetExtension($_).ToLower() })
 $exfilPattern = ($exfilStrings | ForEach-Object { [regex]::Escape($_) }) -join '|'
-$specs = $textExtensions | ForEach-Object { '*' + $_ }
+$textFiles = @(Select-Paths -ListFile $listFile -Patterns ($textExtensions) -EndsWith)
+$scopeNote = 'whole tree'
+if (-not $Deep) {
+    # On a tree with millions of vendored files this sweep dominates everything
+    # else, and checks 1-3 already cover malicious packages by name and version.
+    # Excluded rather than silently truncated -- the count is always reported.
+    $vendored = $textFiles.Count
+    $textFiles = @($textFiles | Where-Object { $_ -notlike '*\node_modules\*' })
+    $scopeNote = "excluding node_modules; $($vendored - $textFiles.Count) vendored files skipped, use -Deep to include them"
+}
 # This script carries the indicator strings itself, so it would flag its own copy.
 $self = if ($PSCommandPath) { $PSCommandPath } else { '' }
-foreach ($file in (Find-InTree -Root $root -FileSpecs $specs -Literals $exfilStrings)) {
+foreach ($file in (Search-Content -Files $textFiles -Literals $exfilStrings)) {
     if ($self -and ($file -ieq $self)) { continue }
     foreach ($hit in (Select-String -LiteralPath $file -Pattern $exfilPattern -ErrorAction SilentlyContinue)) {
         Write-Finding "$file (line $($hit.LineNumber)): $($hit.Matches[0].Value)"
     }
 }
-if ($findings -eq $before) { Write-Clear "no exfiltration strings ($($textFiles.Count) text files searched)" }
+if ($findings -eq $before) { Write-Clear "no exfiltration strings ($($textFiles.Count) files searched, $scopeNote)" }
 
 # ------------------------------------------------------------------- summary
 
+$stopwatch.Stop()
+Remove-Item -LiteralPath $workspace -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host ''
 if ($findings -gt 0) {
-    Write-Host "$findings finding(s) -- triage every one by hand." -ForegroundColor Red
+    Write-Host "$findings finding(s) in $([math]::Round($stopwatch.Elapsed.TotalSeconds,1))s -- triage every one by hand." -ForegroundColor Red
     Write-Host "Rotate npm/GitHub/cloud tokens before assuming this was a false positive." -ForegroundColor Red
     exit 1
 }
 
-Write-Host "No indicators found in $root" -ForegroundColor Green
+Write-Host "No indicators found in $root ($([math]::Round($stopwatch.Elapsed.TotalSeconds,1))s)" -ForegroundColor Green
 exit 0

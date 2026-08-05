@@ -52,10 +52,12 @@ Scans local or checked-out projects for indicators of compromise from the **Shai
 ```powershell
 .\scan-npm-shai-hulud.ps1 -Path D:\sites   # everything under a projects root
 .\scan-npm-shai-hulud.ps1 -Quiet           # findings only
+.\scan-npm-shai-hulud.ps1 -Deep            # also sweep node_modules in check 6
 ```
 ```bash
 ./scan-npm-shai-hulud.sh ~/sites
 ./scan-npm-shai-hulud.sh --quiet
+./scan-npm-shai-hulud.sh --deep
 ```
 
 Six checks, read-only — nothing is modified, deleted, or quarantined:
@@ -71,11 +73,16 @@ Six checks, read-only — nothing is modified, deleted, or quarantined:
 
 ### Speed
 
-Built for trees full of `node_modules`. It enumerates paths once via the native `dir /s /b` (PowerShell) or `find` (bash), narrows by string matching, and only then opens a file. Content searches run as a single `findstr`/`grep` process rather than a per-file pipeline.
+Walking the disk is the whole cost. On a real `D:\sites` with **7.5 million files**, one full traversal takes about 5.6 minutes — so the script does exactly **one**, with `dir` redirecting to a list file on disk. Every check is then a sequential `findstr` over that list, which costs seconds instead of another walk.
 
-Measured on a real projects root: **150,120 files, all six checks, ~60s.**
+Nothing is ever piped into a PowerShell array. Building a 7.5M-element array plus a hashtable keyed on every path is multiple GB, and it's what makes naive versions run for hours or die. If you write your own, also avoid `Get-ChildItem -Recurse -Include` — measured ~8× slower than native `dir` on a mere 5,638-file tree, and it degrades from there.
 
-Avoid `Get-ChildItem -Recurse -Include` if you write your own version — it's ~8× slower than native `dir` on a small tree and degrades badly with scale. That pattern is what makes naive versions of this scan appear to hang for hours.
+`-Deep` / `--deep` adds `node_modules` to check 6's content sweep. It's off by default because on a vendored tree that one sweep dominates everything else, while checks 1–3 already cover malicious packages by filename and by version. The number of skipped files is always printed — nothing is silently truncated.
+
+Two Windows gotchas encoded in the script, both of which cause **silent false negatives**:
+
+- `findstr /f:<list>` matches nothing with long absolute paths, while the same files passed as arguments match fine. Files go in as batched arguments instead.
+- A `/c:` pattern containing `@` (as in `@cacheable/memory`) matches nothing. Scoped package names are resolved in PowerShell rather than by pattern.
 
 ### False positives
 

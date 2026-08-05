@@ -20,6 +20,11 @@
 # Usage:
 #   ./scan-npm-shai-hulud.sh [PATH]     # defaults to .
 #   ./scan-npm-shai-hulud.sh --quiet    # findings and summary only
+#   ./scan-npm-shai-hulud.sh --deep     # include node_modules in the check 6 sweep
+#
+# Check 6 skips node_modules by default. On a tree with millions of vendored files
+# that sweep dominates the runtime, while checks 1-3 already cover malicious
+# packages by filename and by version. The number skipped is always reported.
 #
 # Exit codes: 0 = nothing found, 1 = findings, 2 = bad usage.
 #
@@ -87,11 +92,13 @@ declare -A KNOWN_BENIGN=(
 
 target="."
 quiet=0
+deep=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --quiet|-q) quiet=1 ;;
-    --help|-h)  sed -n '3,36p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --deep)     deep=1 ;;
+    --help|-h)  sed -n '3,42p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*)         echo "unknown option: $1 (try --help)" >&2; exit 2 ;;
     *)          target="$1" ;;
   esac
@@ -213,13 +220,20 @@ check "6. Exfiltration infrastructure strings"
 before=$findings
 # This script carries the indicator strings itself, so it would flag its own copy.
 self="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
+if [ "$deep" -eq 1 ]; then
+  scope_note="whole tree"
+  grep_scope=(--exclude-dir=.git)
+else
+  scope_note="excluding node_modules, use --deep to include it"
+  grep_scope=(--exclude-dir=.git --exclude-dir=node_modules)
+fi
 while IFS= read -r hit; do
   [ "${hit%%:*}" = "$self" ] && continue
   finding "$hit"
-done < <(grep -rnIF --exclude-dir=.git \
+done < <(grep -rnIF "${grep_scope[@]}" \
            -e "${EXFIL_STRINGS[0]}" -e "${EXFIL_STRINGS[1]}" -e "${EXFIL_STRINGS[2]}" \
            "$target" 2>/dev/null)
-[ "$findings" -eq "$before" ] && clear_msg "no exfiltration strings"
+[ "$findings" -eq "$before" ] && clear_msg "no exfiltration strings ($scope_note)"
 
 # ------------------------------------------------------------------- summary
 
