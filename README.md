@@ -1,22 +1,124 @@
-# 🛠️ Useful Commands & Tricks
+# 🧰 scripts
 
-A growing collection of handy commands, fixes, and workarounds for developers.
+Independent developer scripts. Take the one you want — nothing here depends on anything else here.
 
-> Things that took me way too long to figure out — so you don't have to.
+> Things that took me way too long to figure out — now with a `--help` flag.
+
+**Not a tool.** No install, no framework, no config, no shared library. Every script is a single self-contained file: download it, or open it and copy-paste it into a local file. If you want the NUL fix, take the NUL fix. If you want the supply-chain scan, take that. Nothing else comes with it.
+
+Companion to [helpers.apsolut.dev](https://helpers.apsolut.dev/): that's the **docs** — searchable cheatsheets for git, shell, PowerShell, Windows, WSL, agents. This is the **executables**. If it's something you read, it belongs there. If it's something you run, it belongs here.
 
 ---
 
-## 📂 Contents
+## 📂 Scripts
 
-| Guide | Description |
-|-------|-------------|
-| [Removing NUL Files](./removing-nul.md) | How to delete undeletable `nul` files that AI tools create on Windows |
+Folders match the sections on [helpers.apsolut.dev](https://helpers.apsolut.dev/) — read it there, run it from here.
+
+| Script | Platform | What it does |
+|--------|----------|--------------|
+| [`security/scan-npm-shai-hulud.ps1`](./security/scan-npm-shai-hulud.ps1) | Windows | Scans for Shai-Hulud npm supply-chain indicators of compromise |
+| [`security/scan-npm-shai-hulud.sh`](./security/scan-npm-shai-hulud.sh) | Linux / macOS / WSL | Same scan, same checks, same exit codes |
+| [`windows/nuke-nul.ps1`](./windows/nuke-nul.ps1) | Windows | Deletes files with reserved device names (`nul`, `con`, `aux`, `com0-9`, `lpt0-9`) that Explorer and `del` both refuse to touch |
+| [`shell/bashrc-setup.sh`](./shell/bashrc-setup.sh) | WSL2 / bash | Writes the power-tools block into `~/.bashrc` — zoxide, atuin, direnv, fzf, oh-my-posh + eza/bat/lazygit aliases |
+
+`.ps1` = Windows/PowerShell. `.sh` = bash. The filename says which incident or job it handles, so a folder full of them stays readable.
+
+---
+
+## 🚀 Getting one
+
+**Download just the file you want:**
+
+```powershell
+irm https://raw.githubusercontent.com/apsolut-public/scripts/main/security/scan-npm-shai-hulud.ps1 -OutFile scan.ps1
+.\scan.ps1 -Path D:\sites
+```
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/apsolut-public/scripts/main/security/scan-npm-shai-hulud.sh
+bash scan-npm-shai-hulud.sh ~/sites
+```
+
+**Or open it on GitHub, copy, paste into a local file, run it.** Every script is written to survive that — no imports, no companion files, no setup step.
+
+Read before you run, especially the security ones. They're short on purpose.
+
+---
+
+## 🚨 scan-npm-shai-hulud
+
+Scans local or checked-out projects for indicators of compromise from the **Shai-Hulud** npm supply-chain attacks — the [August 2026 wave](https://www.aikido.dev/blog/keyv-and-friends-compromised-in-npm-supply-chain-attack) that hit `keyv`, `cacheable`, `cache-manager`, `ecto` and friends, plus payload filenames carried over from the November 2025 wave.
+
+```powershell
+.\scan-npm-shai-hulud.ps1 -Path D:\sites   # everything under a projects root
+.\scan-npm-shai-hulud.ps1 -Quiet           # findings only
+```
+```bash
+./scan-npm-shai-hulud.sh ~/sites
+./scan-npm-shai-hulud.sh --quiet
+```
+
+Six checks, read-only — nothing is modified, deleted, or quarantined:
+
+1. **Payload files** by name (`setup.mjs`, `math_init.js`, `Math_Symbol.js`, `setup_bun.js`, `bun_environment.js`) — SHA-256 printed with each hit
+2. **`preinstall` hooks** in any `package.json` that launch a payload
+3. **Compromised versions** under `node_modules` — all 11 primary packages, scoped names (`@cacheable/memory`) included, nested `node_modules` resolved to the right package
+4. **GitHub Actions workflows** dumping the whole secrets context (`toJSON(secrets)`)
+5. **IDE persistence** written into `.vscode/tasks.json` or `.claude/settings.json`
+6. **Exfiltration strings** — the fallback domain, the `Shai-Hulud: Here We Go Again` campaign marker, the wallet address
+
+**Exit `0` when nothing is found, `1` on findings, `2` on bad usage** — so it drops straight into CI or a pre-commit hook.
+
+A payload filename is reported whether or not its hash matches. A matching hash confirms the exact published sample; a **non-matching hash means an unknown variant, not a clean file**. Triage every hit by hand, and rotate npm/GitHub/cloud tokens before writing one off as a false positive.
+
+Indicators live in one clearly-marked block at the top of each file. When new ones are published, that block is the only thing that changes.
+
+For known, catalogued vulnerabilities, use [osv-scanner](https://github.com/google/osv-scanner) or `npm audit` — they're maintained and complete. This is for the first days of a fresh incident, when the indicators are in a blog post and no scanner has ingested them yet.
+
+---
+
+## 🗑️ nuke-nul.ps1
+
+AI coding tools (Cursor, Copilot, and friends) occasionally create a file literally named `nul`. Windows treats that as a device, not a file, so Explorer and a plain `del` both refuse. The escape hatch is the `\\?\` prefix, which skips Win32 path parsing and hands the raw path to the filesystem.
+
+```powershell
+.\nuke-nul.ps1                          # scan current directory
+.\nuke-nul.ps1 -Path D:\sites -Recurse  # scan a whole tree
+.\nuke-nul.ps1 -Recurse -WhatIf         # show what would go, delete nothing
+```
+
+Matches reserved names with or without an extension, so `nul.txt` counts too. Exits `1` if any deletion failed — if that happens, re-run in an elevated PowerShell.
+
+Git already refuses to track reserved names, so these never reach a remote. They just clutter `git status`.
+
+Written up at [helpers.apsolut.dev/windows/remove-nul](https://helpers.apsolut.dev/windows/remove-nul.html).
+
+---
+
+## 🐚 bashrc-setup.sh
+
+```bash
+./bashrc-setup.sh --dry-run     # print the block, change nothing
+./bashrc-setup.sh               # write it into ~/.bashrc (backs up to ~/.bashrc.bak first)
+./bashrc-setup.sh --remove      # strip it back out
+OMP_THEME=atomic ./bashrc-setup.sh
+```
+
+The block sits between markers, so re-running replaces it rather than appending a second copy. Everything outside the markers is left byte-identical.
+
+Every line is guarded by `command -v`, so a tool you haven't installed contributes nothing and the block never breaks a fresh shell. It also handles the packaging quirks: Debian/Ubuntu's `batcat` and `exa` binary names, and `fzf --bash` on fzf ≥ 0.48 versus sourcing `key-bindings.bash` on older builds.
+
+It installs the *shell wiring*, not the tools themselves. For what each tool does, see [WSL2 Bash power tools](https://helpers.apsolut.dev/shell/power-tools.html).
 
 ---
 
 ## 🤝 Contributing
 
-Found a useful trick? Feel free to open a PR or issue!
+New script? Drop it in the folder that matches its topic, add a row to the table, and keep it **standalone** — one file, no imports, no companion data, runnable straight after a copy-paste. Give it `--help` and a dry-run flag where it changes anything.
+
+Name it so the filename alone says what it is (`scan-npm-shai-hulud`, not `scan`). A folder of thirty scripts should still be readable.
+
+Prose, cheatsheets, and command references go to [helpers.apsolut.dev](https://helpers.apsolut.dev/) instead.
 
 ---
 
