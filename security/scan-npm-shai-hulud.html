@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shai-Hulud npm scanner — check your tree for the keyv supply-chain compromise</title>
+<meta name="description" content="Standalone read-only scanners (PowerShell + bash) for indicators of compromise from the August 2026 Shai-Hulud npm supply-chain attack on keyv, cacheable, cache-manager and friends. Based on research published by Aikido Security.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;800&family=IBM+Plex+Sans:wght@200;400;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    /* Gruvbox dark — warm terminal instrument panel */
+    --bg:#1d2021; --surface:#282828; --surface2:#32302f; --surface3:#3c3836;
+    --text:#ebdbb2; --dim:#a89984; --faint:#7c6f64; --border:#3c3836;
+    --gold:#fabd2f; --green:#b8bb26; --red:#fb4934; --blue:#83a598; --orange:#fe8019; --pink:#d3869b;
+    --aqua:#8ec07c; --gray:#928374;
+    --mono:'JetBrains Mono',ui-monospace,monospace;
+    --sans:'IBM Plex Sans',system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth;scroll-padding-top:4.5rem}
+  body{
+    margin:0;background:var(--bg);color:var(--text);
+    font-family:var(--sans);font-weight:400;line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+  }
+  body::before{
+    content:'';position:fixed;inset:0;z-index:-2;pointer-events:none;
+    background:
+      radial-gradient(ellipse 70% 50% at 15% -5%,rgba(250,189,47,.10),transparent 60%),
+      radial-gradient(ellipse 60% 50% at 90% 20%,rgba(131,165,152,.08),transparent 60%),
+      radial-gradient(ellipse 80% 40% at 50% 110%,rgba(254,128,25,.06),transparent 60%);
+  }
+  body::after{
+    content:'';position:fixed;inset:0;z-index:-1;pointer-events:none;opacity:.35;
+    background-image:linear-gradient(rgba(235,219,178,.03) 1px,transparent 1px),
+                     linear-gradient(90deg,rgba(235,219,178,.03) 1px,transparent 1px);
+    background-size:32px 32px;
+  }
+
+  /* ---- type ---- */
+  .eyebrow{font-family:var(--mono);font-size:.68rem;font-weight:500;letter-spacing:.28em;text-transform:uppercase;color:var(--gold);margin:0}
+  h1{font-family:var(--mono);font-weight:800;font-size:clamp(1.9rem,5.6vw,3.8rem);line-height:1.02;letter-spacing:-.045em;margin:.6rem 0 0}
+  h1 em{font-style:normal;color:var(--gold)}
+  h2{font-family:var(--mono);font-weight:800;font-size:clamp(1.35rem,3.2vw,2.1rem);letter-spacing:-.03em;margin:0 0 .4rem}
+  h3{font-family:var(--mono);font-weight:500;font-size:.95rem;letter-spacing:.02em;margin:1.6rem 0 .5rem;color:var(--text)}
+  .lede{font-size:clamp(1.05rem,2.2vw,1.35rem);font-weight:200;color:var(--text);max-width:44rem;margin:1.4rem 0 0}
+  .sub{color:var(--dim);max-width:44rem;margin:.35rem 0 1.6rem;font-size:.98rem}
+  strong{font-weight:600;color:#fff}
+  code{font-family:var(--mono);font-size:.82em;background:var(--surface2);border:1px solid var(--border);padding:.1em .38em;border-radius:3px;color:var(--gold);word-break:break-word}
+  a{color:var(--blue)}
+  a:hover{color:var(--gold)}
+  .n{font-family:var(--mono);font-weight:500;color:var(--gold)}
+
+  /* ---- code blocks ---- */
+  pre{
+    background:var(--surface);border:1px solid var(--border);
+    padding:1rem 1.1rem;overflow-x:auto;margin:1rem 0 0;
+    font-family:var(--mono);font-size:.82rem;line-height:1.65;color:var(--text);
+  }
+  pre code{background:none;border:0;padding:0;color:var(--text);font-size:1em}
+  pre .cmt{color:var(--faint)}
+  pre .p{color:var(--gold)}
+
+  /* ---- layout ---- */
+  header{max-width:64rem;margin:0 auto;padding:4.5rem 1.5rem 2rem}
+  main{max-width:64rem;margin:0 auto;padding:0 1.5rem 6rem}
+  section{padding:3.2rem 0;border-top:1px solid var(--border)}
+  footer{max-width:64rem;margin:0 auto;padding:2rem 1.5rem 4rem;border-top:1px solid var(--border);color:var(--faint);font-family:var(--mono);font-size:.72rem;line-height:1.9}
+  footer a{color:var(--dim)}
+
+  nav{position:sticky;top:0;z-index:50;background:rgba(29,32,33,.93);backdrop-filter:blur(10px);border-bottom:1px solid var(--border)}
+  nav ul{display:flex;gap:.2rem;list-style:none;margin:0 auto;padding:.55rem 1.5rem;max-width:64rem;overflow-x:auto;scrollbar-width:none}
+  nav ul::-webkit-scrollbar{display:none}
+  nav a{font-family:var(--mono);font-size:.7rem;letter-spacing:.06em;text-transform:uppercase;color:var(--dim);text-decoration:none;padding:.35rem .6rem;border-radius:3px;white-space:nowrap}
+  nav a:hover{color:var(--gold);background:var(--surface2)}
+
+  nav a:focus-visible,summary:focus-visible,button:focus-visible,a:focus-visible{outline:2px solid var(--gold);outline-offset:2px;border-radius:3px}
+
+  /* ---- stat strip ---- */
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(9rem,1fr));gap:1px;background:var(--border);border:1px solid var(--border);margin:2.4rem 0 0}
+  .stat{background:var(--surface);padding:1rem 1.1rem}
+  .stat .v{font-family:var(--mono);font-weight:800;font-size:1.6rem;letter-spacing:-.03em;line-height:1;color:var(--gold)}
+  .stat .v.g{color:var(--green)} .stat .v.r{color:var(--red)} .stat .v.b{color:var(--blue)}
+  .stat .k{font-family:var(--mono);font-size:.62rem;letter-spacing:.13em;text-transform:uppercase;color:var(--dim);margin-top:.4rem;line-height:1.4}
+
+  /* ---- flow ---- */
+  .flow{display:grid;grid-template-columns:repeat(auto-fit,minmax(16rem,1fr));gap:.5rem;margin:1.8rem 0}
+  .step{min-width:0;background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--gold);padding:.85rem .9rem}
+  .step:nth-child(2){border-left-color:var(--blue)}
+  .step:nth-child(3){border-left-color:var(--pink)}
+  .step:nth-child(4){border-left-color:var(--green)}
+  .step:nth-child(5){border-left-color:var(--orange)}
+  .step:nth-child(6){border-left-color:var(--aqua)}
+  .step .t{font-family:var(--mono);font-size:.7rem;letter-spacing:.1em;text-transform:uppercase;color:var(--dim)}
+  .step .d{font-size:.9rem;margin-top:.3rem;color:var(--text)}
+
+  /* ---- tables ---- */
+  .wrap{overflow-x:auto;border:1px solid var(--border);background:var(--surface);margin:1.4rem 0}
+  table{width:100%;border-collapse:collapse;font-size:.87rem;min-width:34rem}
+  th{font-family:var(--mono);font-size:.62rem;letter-spacing:.13em;text-transform:uppercase;color:var(--dim);text-align:left;padding:.7rem .9rem;border-bottom:1px solid var(--border);font-weight:500;background:var(--surface2);white-space:nowrap}
+  td{padding:.7rem .9rem;border-bottom:1px solid var(--border);vertical-align:top}
+  tr:last-child td{border-bottom:0}
+  tbody tr:hover{background:var(--surface2)}
+  td.mono,th.mono{font-family:var(--mono);font-size:.78rem;white-space:nowrap}
+
+  /* ---- badges ---- */
+  .b{font-family:var(--mono);font-size:.6rem;font-weight:500;letter-spacing:.1em;text-transform:uppercase;padding:.2rem .45rem;border-radius:2px;white-space:nowrap;display:inline-block}
+  .b.live{background:rgba(184,187,38,.16);color:var(--green);border:1px solid rgba(184,187,38,.35)}
+  .b.ready{background:rgba(254,128,25,.15);color:var(--orange);border:1px solid rgba(254,128,25,.35)}
+  .b.block{background:rgba(251,73,52,.15);color:var(--red);border:1px solid rgba(251,73,52,.35)}
+  .b.new{background:rgba(131,165,152,.15);color:var(--blue);border:1px solid rgba(131,165,152,.35)}
+  .b.off{background:var(--surface2);color:var(--faint);border:1px solid var(--border)}
+
+  /* ---- callout ---- */
+  .call{background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--gold);padding:1.1rem 1.2rem;margin:1.5rem 0}
+  .call.r{border-left-color:var(--red)}
+  .call .h{font-family:var(--mono);font-size:.68rem;letter-spacing:.15em;text-transform:uppercase;color:var(--gold);margin-bottom:.45rem}
+  .call.r .h{color:var(--red)}
+
+  /* ---- details ---- */
+  details{background:var(--surface);border:1px solid var(--border);margin:.6rem 0}
+  summary{cursor:pointer;padding:.7rem .9rem;font-family:var(--mono);font-size:.78rem;color:var(--blue);list-style:none}
+  summary::-webkit-details-marker{display:none}
+  summary::before{content:'▸ ';color:var(--faint)}
+  details[open] summary::before{content:'▾ '}
+  details[open] summary{border-bottom:1px solid var(--border);color:var(--gold)}
+  .dbody{padding:.9rem;font-size:.87rem}
+  .dbody p:first-child{margin-top:0}
+  .dbody p:last-child{margin-bottom:0}
+
+  button.cp{font-family:var(--mono);font-size:.68rem;padding:.4rem .7rem;background:var(--surface2);color:var(--green);border:1px solid var(--border);border-radius:3px;cursor:pointer;margin-left:.4rem}
+  button.cp:hover{border-color:var(--green)}
+  .cmdhead{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.4rem;margin-top:1.6rem}
+  .cmdhead h3{margin:0}
+
+  /* ---- motion ---- */
+  @keyframes rise{from{opacity:0;transform:translateY(18px)}to{opacity:1;transform:none}}
+  header>*,main>section{animation:rise .55s ease-out both}
+  header>*:nth-child(1){animation-delay:.04s}
+  header>*:nth-child(2){animation-delay:.10s}
+  header>*:nth-child(3){animation-delay:.16s}
+  header>*:nth-child(4){animation-delay:.22s}
+  header>*:nth-child(5){animation-delay:.28s}
+  main>section{animation-delay:calc(.20s + var(--i,0)*.07s)}
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;scroll-behavior:auto}}
+
+  /* ---- print: Gruvbox Light remap ---- */
+  @media print{
+    :root{
+      --bg:#fbf1c7; --surface:#f2e5bc; --surface2:#ebdbb2; --surface3:#d5c4a1;
+      --text:#3c3836; --dim:#665c54; --faint:#7c6f64; --border:#d5c4a1;
+      --gold:#b57614; --green:#79740e; --red:#9d0006; --blue:#076678; --orange:#af3a03; --pink:#8f3f71;
+      --aqua:#427b58; --gray:#928374;
+    }
+    body::before,body::after,nav,button.cp{display:none}
+    strong{color:#282828}
+    body{font-weight:400}
+    section,.wrap,details,pre{break-inside:avoid}
+    header>*,main>section{animation:none}
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <p class="eyebrow">npm supply-chain incident · Aug 2026 · Shai-Hulud</p>
+  <h1>One <em>npm install</em> was enough.<br>Check your tree with one file.</h1>
+  <p class="lede">On August 4, 2026, malicious versions of <code>keyv</code>, <code>cacheable</code>, <code>cache-manager</code>, <code>flat-cache</code> and seven sibling packages shipped to npm and started stealing credentials on install. These are two standalone, read-only scanner scripts — one PowerShell, one bash — that sweep your local projects for the published indicators of compromise.</p>
+  <p class="sub">What happened, whether you're affected, how to run the scan, and what to do with a finding. Indicators researched and published by <a href="https://www.aikido.dev/blog/keyv-and-friends-compromised-in-npm-supply-chain-attack">Aikido Security</a>.</p>
+  <div class="stats">
+    <div class="stat"><div class="v r">2B+</div><div class="k">monthly installs of the poisoned packages</div></div>
+    <div class="stat"><div class="v">11</div><div class="k">packages in the first wave</div></div>
+    <div class="stat"><div class="v r">434+</div><div class="k">packages after worm spread</div></div>
+    <div class="stat"><div class="v g">6</div><div class="k">checks, all read-only</div></div>
+    <div class="stat"><div class="v b">1</div><div class="k">file to download &amp; run</div></div>
+  </div>
+</header>
+
+<nav>
+  <ul>
+    <li><a href="#incident">Incident</a></li>
+    <li><a href="#affected">Affected</a></li>
+    <li><a href="#run">Run it</a></li>
+    <li><a href="#checks">Checks</a></li>
+    <li><a href="#findings">Findings</a></li>
+    <li><a href="#faq">FAQ</a></li>
+    <li><a href="#source">Source</a></li>
+  </ul>
+</nav>
+
+<main>
+
+<section id="incident" style="--i:0">
+  <p class="eyebrow">01 — The incident</p>
+  <h2>A preinstall hook did all the work</h2>
+  <p class="sub">Attackers took over the <code>keyv</code> maintainer's GitHub account and cut releases with valid GitHub Actions signatures — the packages passed every normal supply-chain check. The campaign brands itself <em>“Shai-Hulud: Here We Go Again”</em>.</p>
+
+  <div class="flow">
+    <div class="step"><div class="t">1 · Infect</div><div class="d">Releases ship two extra files (<code>setup.mjs</code>, <code>Math_Symbol.js</code>) plus <code>"preinstall": "node setup.mjs"</code> — the payload runs the moment <code>npm install</code> touches the package.</div></div>
+    <div class="step"><div class="t">2 · Harvest</div><div class="d">The 728&nbsp;KB payload grabs npm and GitHub tokens, AWS / cloud credentials, Kubernetes and Vault secrets, Stripe and Slack keys, <code>.env</code> files and SSH keys via ~200 filesystem patterns.</div></div>
+    <div class="step"><div class="t">3 · Exfiltrate</div><div class="d">Loot is encrypted and pushed to attacker-controlled GitHub repos (1,300+ found) or the fallback domain <code>npm-cache[.]com</code>.</div></div>
+    <div class="step"><div class="t">4 · Spread</div><div class="d">Stolen npm tokens publish more infected packages — <span class="n">434+</span> packages within hours — and persistence lands in <code>.vscode/tasks.json</code> and <code>.claude/settings.json</code> so your editor or AI agent re-runs it later.</div></div>
+  </div>
+
+  <div class="call">
+    <div class="h">Where the indicators come from</div>
+    Everything this scanner knows — affected packages and exact versions, payload filenames, SHA-256 hashes, exfiltration infrastructure — was researched and published by <a href="https://www.aikido.dev/"><strong>Aikido Security</strong></a> in <a href="https://www.aikido.dev/blog/keyv-and-friends-compromised-in-npm-supply-chain-attack">their write-up of the attack</a>. The scripts only automate checking your machine for what their research turned up. Read their post for the full story and current remediation guidance.
+  </div>
+</section>
+
+<section id="affected" style="--i:1">
+  <p class="eyebrow">02 — Am I affected</p>
+  <h2>You depend on these. The question is which version.</h2>
+  <p class="sub">These are transitive dependencies of half the npm ecosystem — <code>keyv</code> alone sees ~<span class="n">604M</span> monthly downloads, and the eleven first-wave packages combine to over <span class="n">2&nbsp;billion</span>. Malicious only in the exact versions below, published August&nbsp;4 and since pulled. If you — or your CI, or a coding agent — ran <code>npm install</code> in that window, spend ten minutes and scan.</p>
+
+  <div class="wrap">
+  <table>
+    <thead><tr><th>Package</th><th class="mono">Bad version</th><th>Package</th><th class="mono">Bad version</th></tr></thead>
+    <tbody>
+      <tr><td><strong>keyv</strong></td><td class="mono">6.0.0</td><td><strong>cache-manager</strong></td><td class="mono">7.2.10</td></tr>
+      <tr><td><strong>flat-cache</strong></td><td class="mono">6.1.24</td><td><strong>@cacheable/node-cache</strong></td><td class="mono">3.1.2</td></tr>
+      <tr><td><strong>file-entry-cache</strong></td><td class="mono">11.1.6</td><td><strong>@cacheable/utils</strong></td><td class="mono">2.5.1</td></tr>
+      <tr><td><strong>cacheable-request</strong></td><td class="mono">13.0.20</td><td><strong>@cacheable/net</strong></td><td class="mono">2.1.1</td></tr>
+      <tr><td><strong>cacheable</strong></td><td class="mono">2.5.1</td><td><strong>ecto</strong></td><td class="mono">5.0.1</td></tr>
+      <tr><td><strong>@cacheable/memory</strong></td><td class="mono">2.2.1</td><td colspan="2">+ payload filenames carried over from the Nov&nbsp;2025 wave</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section id="run" style="--i:2">
+  <p class="eyebrow">03 — Run the scan</p>
+  <h2>Download one file. Read it. Run it.</h2>
+  <p class="sub">Each script is a single self-contained file — no install, no dependencies, no companion files. It only reads your disk: nothing is modified, deleted, or quarantined. Open it on GitHub first if you like; they're short on purpose.</p>
+
+  <div class="cmdhead">
+    <h3>Windows · PowerShell</h3>
+    <button class="cp" onclick="navigator.clipboard.writeText(document.getElementById('cmd-ps').textContent.trim()).then(()=>{this.textContent='✓ copied';setTimeout(()=>this.textContent='copy',1600)})">copy</button>
+  </div>
+  <pre><code id="cmd-ps">irm https://raw.githubusercontent.com/apsolut-public/scripts/main/security/scan-npm-shai-hulud.ps1 -OutFile scan.ps1
+.\scan.ps1 -Path D:\sites</code></pre>
+
+  <div class="cmdhead">
+    <h3>Linux / macOS / WSL · bash</h3>
+    <button class="cp" onclick="navigator.clipboard.writeText(document.getElementById('cmd-sh').textContent.trim()).then(()=>{this.textContent='✓ copied';setTimeout(()=>this.textContent='copy',1600)})">copy</button>
+  </div>
+  <pre><code id="cmd-sh">curl -fsSLO https://raw.githubusercontent.com/apsolut-public/scripts/main/security/scan-npm-shai-hulud.sh
+bash scan-npm-shai-hulud.sh ~/sites</code></pre>
+
+  <div class="stats" style="margin:1.8rem 0 0">
+    <div class="stat"><div class="v g">0</div><div class="k">exit — nothing found</div></div>
+    <div class="stat"><div class="v r">1</div><div class="k">exit — findings, triage them</div></div>
+    <div class="stat"><div class="v">2</div><div class="k">exit — bad usage</div></div>
+  </div>
+
+  <p class="sub" style="margin-top:1.4rem">Both versions run the same checks, print the same counts, and return the same exit codes — either one drops straight into CI or a pre-commit hook. <code>-Quiet</code> / <code>--quiet</code> prints findings only. <code>-Deep</code> / <code>--deep</code> extends the content sweep into <code>node_modules</code> — off by default because it dominates runtime on vendored trees while other checks already cover packages by filename and version.</p>
+</section>
+
+<section id="checks" style="--i:3">
+  <p class="eyebrow">04 — The six checks</p>
+  <h2>Filename, hook, version, workflow, persistence, strings</h2>
+  <p class="sub">One full directory walk total — about <span class="n">5–6 min</span> on a 7.5-million-file tree — then every check runs against that list. All read-only.</p>
+
+  <div class="flow">
+    <div class="step"><div class="t">1 · Payload files</div><div class="d"><code>setup.mjs</code>, <code>math_init.js</code>, <code>Math_Symbol.js</code>, plus the Nov&nbsp;2025 bun payloads — SHA-256 printed with every hit.</div></div>
+    <div class="step"><div class="t">2 · Preinstall hooks</div><div class="d">Any <code>package.json</code> whose <code>preinstall</code> launches a payload.</div></div>
+    <div class="step"><div class="t">3 · Bad versions</div><div class="d">The eleven compromised versions installed under <code>node_modules</code> — scoped names included, nested trees resolved to the right package.</div></div>
+    <div class="step"><div class="t">4 · Actions workflows</div><div class="d">GitHub Actions workflows that dump the entire secrets context (<code>toJSON(secrets)</code>).</div></div>
+    <div class="step"><div class="t">5 · IDE persistence</div><div class="d">Malicious entries planted in <code>.vscode/tasks.json</code> or <code>.claude/settings.json</code>.</div></div>
+    <div class="step"><div class="t">6 · Exfil strings</div><div class="d">The fallback domain, the campaign marker, the attacker's wallet address — in text files, skipping binaries.</div></div>
+  </div>
+
+  <details>
+    <summary>Known false positives — and why they're reported anyway</summary>
+    <div class="dbody">
+      <p><code>regenerate-unicode-properties</code>, a very common transitive dependency, legitimately ships a file called <code>Math_Symbol.js</code> full of unicode data. Those hits are reported as <code>ignored:</code> with a count instead of findings — <strong>unless the hash matches a known-bad sample</strong>. A real payload planted at that path is still caught.</p>
+      <p>Scanning a tree that contains the scripts repo itself will flag the scripts and their README under check 6 — they carry the indicator strings by definition. Each script skips its own file, but not its sibling.</p>
+    </div>
+  </details>
+</section>
+
+<section id="findings" style="--i:4">
+  <p class="eyebrow">05 — If it finds something</p>
+  <h2>Assume the tokens are burned</h2>
+  <p class="sub">A hit with a non-matching hash means an <strong>unknown variant, not a clean file</strong>. Triage every finding by hand — then act in this order, because credential theft is the whole point of the malware.</p>
+
+  <div class="wrap">
+  <table>
+    <thead><tr><th class="mono">Step</th><th>Action</th><th>Why first</th></tr></thead>
+    <tbody>
+      <tr><td><span class="b block">1</span></td><td><strong>Rotate credentials</strong> — npm tokens, GitHub PATs/OAuth/Actions tokens, cloud keys, anything that lived in a <code>.env</code> on that machine.</td><td>Stealing these was the payload's only job; everything else is cleanup.</td></tr>
+      <tr><td><span class="b block">2</span></td><td><strong>Audit your GitHub account</strong> — repositories you didn't create, workflow files you didn't write.</td><td>The campaign exfiltrates through victim-owned repos.</td></tr>
+      <tr><td><span class="b ready">3</span></td><td><strong>Reinstall clean</strong> — delete <code>node_modules</code>, pin or override to safe versions, reinstall from the lockfile.</td><td>Removes the payload the scanner found.</td></tr>
+      <tr><td><span class="b ready">4</span></td><td><strong>Check persistence</strong> — <code>.vscode/tasks.json</code> and <code>.claude/settings.json</code> for entries you didn't put there.</td><td>Otherwise your editor or agent re-infects the clean tree.</td></tr>
+      <tr><td><span class="b new">5</span></td><td><strong>Follow Aikido's remediation</strong> in <a href="https://www.aikido.dev/blog/keyv-and-friends-compromised-in-npm-supply-chain-attack">the write-up</a> — they also offer a free repo scan and install-time blocking via <a href="https://www.aikido.dev/">their tooling</a>.</td><td>They found the campaign; their guidance tracks it as it evolves.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="call r">
+    <div class="h">The honest limit</div>
+    This is an incident-response script for the <strong>first days of a fresh attack</strong>, when the indicators exist only in a blog post and no scanner has ingested them yet. It knows exactly one campaign. For known, catalogued vulnerabilities use the maintained tools — <a href="https://github.com/google/osv-scanner">osv-scanner</a>, <code>npm audit</code>, or <a href="https://www.aikido.dev/">Aikido</a>. The indicator lists live in one marked block at the top of each script; when new IoCs are published, that block is the only thing that changes.
+  </div>
+</section>
+
+<section id="faq" style="--i:5">
+  <p class="eyebrow">06 — Questions</p>
+  <h2>Asked and answered</h2>
+
+  <details>
+    <summary>Is it safe to run a random security script from the internet?</summary>
+    <div class="dbody"><p>Don't take that on faith — that skepticism is exactly what this incident rewards. Each script is one file, short by design, with every indicator in a marked block at the top. Open it, read it, then run it. It only reads your disk and writes nothing but console output and a temp file list.</p></div>
+  </details>
+  <details>
+    <summary>npm already pulled the bad versions — why scan at all?</summary>
+    <div class="dbody"><p>Pulling stops <em>new</em> installs. If a poisoned version landed on your machine during the window, the payload already ran: your tokens may be gone and persistence may be planted. The scan answers "did it touch me", which the registry can't.</p></div>
+  </details>
+  <details>
+    <summary>The scan flagged a file but the hash doesn't match — false positive?</summary>
+    <div class="dbody"><p>Not automatically. A matching hash confirms the exact published sample; a non-matching hash at a payload path means an <strong>unknown variant until proven otherwise</strong>. Known-benign collisions (like <code>regenerate-unicode-properties</code>) are already filtered to <code>ignored:</code>. Triage by hand and rotate tokens before writing anything off.</p></div>
+  </details>
+  <details>
+    <summary>What's the single next step?</summary>
+    <div class="dbody"><p>Copy the two-line command for your platform from <a href="#run">§03</a> and run it against your projects root. Ten minutes, read-only, and exit code <span class="n">0</span> lets you stop thinking about this.</p></div>
+  </details>
+</section>
+
+<section id="source" style="--i:6">
+  <p class="eyebrow">07 — Source</p>
+  <h2>Two files, nothing else</h2>
+  <div class="wrap">
+  <table>
+    <thead><tr><th>File</th><th>Platform</th><th class="mono">Status</th></tr></thead>
+    <tbody>
+      <tr><td><a href="https://github.com/apsolut-public/scripts/blob/main/security/scan-npm-shai-hulud.ps1"><code>scan-npm-shai-hulud.ps1</code></a></td><td>Windows · PowerShell 7+</td><td><span class="b live">maintained</span></td></tr>
+      <tr><td><a href="https://github.com/apsolut-public/scripts/blob/main/security/scan-npm-shai-hulud.sh"><code>scan-npm-shai-hulud.sh</code></a></td><td>Linux / macOS / WSL · bash</td><td><span class="b live">maintained</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="sub">Part of <a href="https://github.com/apsolut-public/scripts">apsolut-public/scripts</a> — standalone developer scripts: every one a single file you can download or copy-paste and run, no install, no shared library.</p>
+</section>
+
+</main>
+
+<footer>
+  Indicators of compromise researched and published by <a href="https://www.aikido.dev/">Aikido Security</a> — <a href="https://www.aikido.dev/blog/keyv-and-friends-compromised-in-npm-supply-chain-attack">“keyv and friends compromised in npm supply chain attack”</a> · figures on this page trace to that write-up.<br>
+  Scripts by <a href="https://github.com/apsolut">AP</a> · take the file, read it, run it.
+</footer>
+
+<script>
+  window.addEventListener('beforeprint',()=>document.querySelectorAll('details').forEach(d=>d.open=true));
+</script>
+
+</body>
+</html>
