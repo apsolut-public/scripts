@@ -1,0 +1,8 @@
+# core.autocrlf=true on Windows would check these out with CRLF, and bash then fails
+# with "bad interpreter: /bin/bash^M". Pin them to LF regardless of platform config.
+*.sh text eol=lf
+
+# PowerShell is fine either way; keep it native so Windows editors behave.
+*.ps1 text
+
+*.png binary

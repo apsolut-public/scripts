@@ -1,0 +1,5 @@
+# apsolut vault — local only, never committed
+.apsolut/
+
+# local agent conventions for the vault — local only
+AGENTS.md
