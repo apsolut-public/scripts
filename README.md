@@ -19,6 +19,7 @@ Folders match the sections on [helpers.apsolut.dev](https://helpers.apsolut.dev/
 | [`security/scan-npm-shai-hulud.ps1`](./security/scan-npm-shai-hulud.ps1) | Windows | Scans for Shai-Hulud npm supply-chain indicators of compromise |
 | [`security/scan-npm-shai-hulud.sh`](./security/scan-npm-shai-hulud.sh) | Linux / macOS / WSL | Same scan, same checks, same exit codes |
 | [`windows/nuke-nul.ps1`](./windows/nuke-nul.ps1) | Windows | Deletes files with reserved device names (`nul`, `con`, `aux`, `com0-9`, `lpt0-9`) that Explorer and `del` both refuse to touch |
+| [`windows/trim-context-menu.ps1`](./windows/trim-context-menu.ps1) | Windows | Makes the Explorer right-click menu fast by blocking the shell extensions you never use — reversible, nothing deleted |
 | [`shell/bashrc-setup.sh`](./shell/bashrc-setup.sh) | WSL2 / bash | Writes the power-tools block into `~/.bashrc` — zoxide, atuin, direnv, fzf, oh-my-posh + eza/bat/lazygit aliases |
 
 `.ps1` = Windows/PowerShell. `.sh` = bash. The filename says which incident or job it handles, so a folder full of them stays readable.
@@ -126,6 +127,22 @@ Written up at [helpers.apsolut.dev/windows/remove-nul](https://helpers.apsolut.d
 
 ---
 
+## 🖱️ trim-context-menu.ps1
+
+A slow right-click is almost never Explorer. Every shell extension registered for what you clicked — Dropbox, Google Drive, OneDrive, antivirus, NVIDIA, PowerToys, Copilot — gets its DLL loaded and asked for menu items before the menu draws. One slow handler stalls the menu every time.
+
+```powershell
+.\trim-context-menu.ps1 -List      # read-only: every handler on this machine, with CLSID and status
+.\trim-context-menu.ps1 -WhatIf    # show what would be hidden
+.\trim-context-menu.ps1            # hide it (elevated shell also hides HKLM verbs)
+.\trim-context-menu.ps1 -Restore   # put it all back
+```
+
+Handlers are blocked by CLSID under `HKCU\…\Shell Extensions\Blocked`, which covers both the classic menu and Windows 11's packaged items. It's per-user, needs no admin, and survives the app re-registering itself on update. Plain verbs like *Git Bash Here* or *WSL* get a `LegacyDisable` value instead. Nothing is deleted. Every value carries a `trim-context-menu` tag, `-Restore` removes only tagged values, and anything you'd already blocked yourself is left alone.
+
+The defaults keep 7-Zip, Notepad++, Open with, Copy as path, Pin and New. What gets hidden is one data block at the top of the file. Run `-List`, then edit that block to taste.
+
+---
 ## 🐚 bashrc-setup.sh
 
 ```bash
