@@ -20,6 +20,7 @@ Folders match the sections on [helpers.apsolut.dev](https://helpers.apsolut.dev/
 | [`security/scan-npm-shai-hulud.sh`](./security/scan-npm-shai-hulud.sh) | Linux / macOS / WSL | Same scan, same checks, same exit codes |
 | [`windows/nuke-nul.ps1`](./windows/nuke-nul.ps1) | Windows | Deletes files with reserved device names (`nul`, `con`, `aux`, `com0-9`, `lpt0-9`) that Explorer and `del` both refuse to touch |
 | [`windows/trim-context-menu.ps1`](./windows/trim-context-menu.ps1) | Windows | Makes the Explorer right-click menu fast by blocking the shell extensions you never use — reversible, nothing deleted |
+| [`windows/trim-startup.ps1`](./windows/trim-startup.ps1) | Windows | Shows what Windows blamed for your slow boots and defers startup junk — services to Manual, logon tasks and Run entries disabled, all restorable |
 | [`shell/bashrc-setup.sh`](./shell/bashrc-setup.sh) | WSL2 / bash | Writes the power-tools block into `~/.bashrc` — zoxide, atuin, direnv, fzf, oh-my-posh + eza/bat/lazygit aliases |
 
 `.ps1` = Windows/PowerShell. `.sh` = bash. The filename says which incident or job it handles, so a folder full of them stays readable.
@@ -141,6 +142,27 @@ A slow right-click is almost never Explorer. Every shell extension registered fo
 Handlers are blocked by CLSID under `HKCU\…\Shell Extensions\Blocked`, which covers both the classic menu and Windows 11's packaged items. It's per-user, needs no admin, and survives the app re-registering itself on update. Plain verbs like *Git Bash Here* or *WSL* get a `LegacyDisable` value instead. Nothing is deleted. Every value carries a `trim-context-menu` tag, `-Restore` removes only tagged values, and anything you'd already blocked yourself is left alone.
 
 The defaults keep 7-Zip, Notepad++, Open with, Copy as path, Pin and New. What gets hidden is one data block at the top of the file. Run `-List`, then edit that block to taste.
+
+---
+## 🚀 trim-startup.ps1
+
+Slow boots on fast SSDs are almost always software. Windows already times every boot and records which processes delayed it — nothing shows you. `-List` does, along with what actually starts with Windows.
+
+```powershell
+.\trim-startup.ps1 -List                     # boot times, what Windows blamed, AV status, what starts (elevated for boot data)
+.\trim-startup.ps1 -WhatIf                   # what the defaults would change
+.\trim-startup.ps1                           # apply (elevated)
+.\trim-startup.ps1 -Service 'Foo*' -RunEntry 'Spotify' -Task '\Vendor\*'   # add your own
+.\trim-startup.ps1 -Restore                  # put everything back
+```
+
+What it catches that Task Manager doesn't:
+
+- **Two antivirus engines.** A third-party AV that's installed but expired or off still loads its drivers, while Defender runs full scanning beside it. `-List` flags it. The script never touches security software, so reactivate or uninstall the AV yourself.
+- **Logon scheduled tasks.** Task Manager's Startup tab doesn't show them, so an app you "disabled" there (OneDrive is the classic) keeps launching.
+- **Vendor services on Automatic** that only matter while their app is open. They go to Manual and still start on demand.
+
+Run entries are disabled the way Task Manager does it, so they show as *Disabled* there. Before any change the original value is saved to `%LOCALAPPDATA%\trim-startup\state.json`, and `-Restore` puts it back. Defaults are wildcard patterns in a data block at the top. Measure with **Restart**, not Shut down — with Fast Startup on, Shut down skips the full boot Windows times.
 
 ---
 ## 🐚 bashrc-setup.sh
